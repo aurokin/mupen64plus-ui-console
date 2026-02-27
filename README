@@ -256,8 +256,9 @@ Example commands:
 {"id":19,"cmd":"framebuffer_dump","path":"/tmp/frame.ppm","scale_div":4}
 {"id":20,"cmd":"framebuffer_presets"}
 {"id":21,"cmd":"framebuffer_dump_preset","path":"/tmp/hud.ppm","preset":"hud","scale_div":2}
-{"id":22,"cmd":"mem_read","addr":2147483648,"bits":32}
-{"id":23,"cmd":"mem_write","addr":2147483648,"bits":32,"value":1}
+{"id":22,"cmd":"depth_dump","path":"/tmp/depth.bin","scale_div":2}
+{"id":23,"cmd":"mem_read","addr":2147483648,"bits":32}
+{"id":24,"cmd":"mem_write","addr":2147483648,"bits":32,"value":1}
 
 Each response is one JSON object per line:
 
@@ -277,6 +278,7 @@ Framebuffer helpers:
   - `battle_ui`
   - `action_command`
 - `framebuffer_dump` remains available for explicit crop rectangles.
+- `depth_dump` writes a cropped/scaled depth artifact as little-endian `u16` values (`format: "u16le"` in response).
 
 Controller input uses the core 32-bit N64 input encoding:
 - Buttons: DPAD Right=0x0001 Left=0x0002 Down=0x0004 Up=0x0008

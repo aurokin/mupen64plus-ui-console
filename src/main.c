@@ -1651,6 +1651,138 @@ static int AgentHandleCommand(int fd, const char *line)
         AgentSendResponse(fd, id, 1, result, NULL);
         return 0;
     }
+    else if (strcmp(cmd, "depth_dump") == 0)
+    {
+        char output_path[1024];
+        int front = 0;
+        int video_size = 0;
+        int width = 0;
+        int height = 0;
+        int crop_x = 0;
+        int crop_y = 0;
+        int crop_w = 0;
+        int crop_h = 0;
+        int scale_div = 1;
+        int out_w = 0;
+        int out_h = 0;
+        uint16_t* depth = NULL;
+        unsigned char* out_depth = NULL;
+        FILE* f = NULL;
+        int y = 0;
+
+        if (!AgentGetString(line, "path", output_path, sizeof(output_path)))
+        {
+            AgentSendResponse(fd, id, 0, NULL, "missing path");
+            return 0;
+        }
+        (void) AgentGetBool(line, "front", &front);
+        if ((*CoreDoCommand)(M64CMD_CORE_STATE_QUERY, M64CORE_VIDEO_SIZE, &video_size) != M64ERR_SUCCESS)
+        {
+            AgentSendResponse(fd, id, 0, NULL, "failed to query video size");
+            return 0;
+        }
+
+        width = (video_size >> 16) & 0xffff;
+        height = video_size & 0xffff;
+        if (width <= 0 || height <= 0)
+        {
+            AgentSendResponse(fd, id, 0, NULL, "invalid video size");
+            return 0;
+        }
+
+        crop_w = width;
+        crop_h = height;
+        (void) AgentGetInt(line, "crop_x", &crop_x);
+        (void) AgentGetInt(line, "crop_y", &crop_y);
+        (void) AgentGetInt(line, "crop_w", &crop_w);
+        (void) AgentGetInt(line, "crop_h", &crop_h);
+        (void) AgentGetInt(line, "scale_div", &scale_div);
+
+        if (crop_x < 0) crop_x = 0;
+        if (crop_y < 0) crop_y = 0;
+        if (crop_w <= 0) crop_w = width - crop_x;
+        if (crop_h <= 0) crop_h = height - crop_y;
+        if (crop_x + crop_w > width) crop_w = width - crop_x;
+        if (crop_y + crop_h > height) crop_h = height - crop_y;
+        if (scale_div < 1) scale_div = 1;
+
+        out_w = crop_w / scale_div;
+        out_h = crop_h / scale_div;
+        if (out_w < 1) out_w = 1;
+        if (out_h < 1) out_h = 1;
+
+        depth = (uint16_t*) malloc((size_t) width * (size_t) height * sizeof(uint16_t));
+        out_depth = (unsigned char*) malloc((size_t) out_w * (size_t) out_h * 2U);
+        if (depth == NULL || out_depth == NULL)
+        {
+            free(depth);
+            free(out_depth);
+            AgentSendResponse(fd, id, 0, NULL, "out of memory");
+            return 0;
+        }
+
+        cmd_result = (*CoreDoCommand)(M64CMD_READ_SCREEN_DEPTH, front ? 1 : 0, depth);
+        if (cmd_result != M64ERR_SUCCESS)
+        {
+            free(depth);
+            free(out_depth);
+            if (cmd_result == M64ERR_UNSUPPORTED)
+                AgentSendResponse(fd, id, 0, NULL, "depth read is not supported by this video plugin");
+            else
+                AgentSendResponse(fd, id, 0, NULL, "read_screen_depth failed");
+            return 0;
+        }
+
+        for (y = 0; y < out_h; ++y)
+        {
+            int x;
+            int src_y = crop_y + y * scale_div;
+            if (src_y >= height) src_y = height - 1;
+            for (x = 0; x < out_w; ++x)
+            {
+                int src_x = crop_x + x * scale_div;
+                size_t src_idx;
+                size_t dst_idx;
+                uint16_t z;
+                if (src_x >= width) src_x = width - 1;
+                src_idx = (size_t) src_y * (size_t) width + (size_t) src_x;
+                dst_idx = ((size_t) y * (size_t) out_w + (size_t) x) * 2U;
+                z = depth[src_idx];
+                out_depth[dst_idx + 0] = (unsigned char) (z & 0xff);
+                out_depth[dst_idx + 1] = (unsigned char) ((z >> 8) & 0xff);
+            }
+        }
+
+        f = fopen(output_path, "wb");
+        if (f == NULL)
+        {
+            free(depth);
+            free(out_depth);
+            AgentSendResponse(fd, id, 0, NULL, "failed to open output path");
+            return 0;
+        }
+        if (fwrite(out_depth, 1, (size_t) out_w * (size_t) out_h * 2U, f) != (size_t) out_w * (size_t) out_h * 2U)
+        {
+            fclose(f);
+            free(depth);
+            free(out_depth);
+            AgentSendResponse(fd, id, 0, NULL, "failed to write depth buffer");
+            return 0;
+        }
+        fclose(f);
+        free(depth);
+        free(out_depth);
+
+        snprintf(result, sizeof(result),
+            "{\"path\":\"%s\",\"format\":\"u16le\",\"source_width\":%d,\"source_height\":%d,"
+            "\"crop_x\":%d,\"crop_y\":%d,\"crop_w\":%d,\"crop_h\":%d,"
+            "\"width\":%d,\"height\":%d,\"scale_div\":%d}",
+            output_path, width, height,
+            crop_x, crop_y, crop_w, crop_h,
+            out_w, out_h, scale_div);
+        AgentSendResponse(fd, id, 1, result, NULL);
+        return 0;
+    }
     else if (strcmp(cmd, "mem_read") == 0)
     {
         uint32_t addr = 0;
