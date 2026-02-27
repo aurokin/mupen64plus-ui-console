@@ -141,6 +141,25 @@ enum
     AGENT_PROFILE_TRAIN = 2
 };
 
+struct agent_framebuffer_preset
+{
+    const char* name;
+    int x_milli;
+    int y_milli;
+    int w_milli;
+    int h_milli;
+    const char* description;
+};
+
+static const struct agent_framebuffer_preset l_AgentFramebufferPresets[] =
+{
+    { "full", 0, 0, 1000, 1000, "full frame" },
+    { "hud", 0, 0, 1000, 220, "top HUD band" },
+    { "dialog", 0, 620, 1000, 380, "bottom dialog area" },
+    { "battle_ui", 0, 470, 1000, 530, "battle command UI area" },
+    { "action_command", 260, 360, 480, 260, "timing / action-command focus region" }
+};
+
 /*********************************************************************************************************
  *  Callback functions from the core
  */
@@ -815,6 +834,106 @@ static uint32_t AgentBuildStateWithStick(uint32_t state, int x, int y)
     return state;
 }
 
+static const struct agent_framebuffer_preset* AgentFindFramebufferPreset(const char* name)
+{
+    size_t i;
+
+    if (name == NULL)
+        return NULL;
+
+    for (i = 0; i < sizeof(l_AgentFramebufferPresets) / sizeof(l_AgentFramebufferPresets[0]); ++i)
+    {
+        if (osal_insensitive_strcmp(name, l_AgentFramebufferPresets[i].name) == 0)
+            return &l_AgentFramebufferPresets[i];
+    }
+
+    return NULL;
+}
+
+static void AgentApplyFramebufferPresetCrop(
+    const struct agent_framebuffer_preset* preset,
+    int width,
+    int height,
+    int* crop_x,
+    int* crop_y,
+    int* crop_w,
+    int* crop_h)
+{
+    int x;
+    int y;
+    int w;
+    int h;
+
+    if (preset == NULL || crop_x == NULL || crop_y == NULL || crop_w == NULL || crop_h == NULL
+        || width <= 0 || height <= 0)
+    {
+        return;
+    }
+
+    x = (width * preset->x_milli) / 1000;
+    y = (height * preset->y_milli) / 1000;
+    w = (width * preset->w_milli) / 1000;
+    h = (height * preset->h_milli) / 1000;
+
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x >= width) x = width - 1;
+    if (y >= height) y = height - 1;
+
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    if (x + w > width) w = width - x;
+    if (y + h > height) h = height - y;
+
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+
+    *crop_x = x;
+    *crop_y = y;
+    *crop_w = w;
+    *crop_h = h;
+}
+
+static int AgentBuildFramebufferPresetListResult(char *out, size_t out_size)
+{
+    size_t used = 0;
+    size_t i;
+    int wrote = 0;
+
+    if (out == NULL || out_size < 32)
+        return 0;
+
+    wrote = snprintf(out, out_size, "{\"presets\":[");
+    if (wrote < 0 || (size_t) wrote >= out_size)
+        return 0;
+    used = (size_t) wrote;
+
+    for (i = 0; i < sizeof(l_AgentFramebufferPresets) / sizeof(l_AgentFramebufferPresets[0]); ++i)
+    {
+        const struct agent_framebuffer_preset* preset = &l_AgentFramebufferPresets[i];
+        wrote = snprintf(
+            out + used,
+            out_size - used,
+            "%s{\"name\":\"%s\",\"x_milli\":%d,\"y_milli\":%d,\"w_milli\":%d,\"h_milli\":%d,\"description\":\"%s\"}",
+            (i == 0) ? "" : ",",
+            preset->name,
+            preset->x_milli,
+            preset->y_milli,
+            preset->w_milli,
+            preset->h_milli,
+            preset->description);
+        if (wrote < 0 || (size_t) wrote >= out_size - used)
+            return 0;
+        used += (size_t) wrote;
+    }
+
+    wrote = snprintf(out + used, out_size - used, "]}");
+    if (wrote < 0 || (size_t) wrote >= out_size - used)
+        return 0;
+
+    return 1;
+}
+
 #ifndef WIN32
 static void AgentSetFd(int *fd_slot, int value)
 {
@@ -1013,7 +1132,7 @@ static int AgentHandleCommand(int fd, const char *line)
 {
     char cmd[64];
     char path[1024];
-    char result[512];
+    char result[4096];
     int id = 0;
     int cmd_result = M64ERR_SUCCESS;
 
@@ -1028,6 +1147,16 @@ static int AgentHandleCommand(int fd, const char *line)
     if (strcmp(cmd, "status") == 0)
     {
         AgentBuildStatusResult(result, sizeof(result));
+        AgentSendResponse(fd, id, 1, result, NULL);
+        return 0;
+    }
+    if (strcmp(cmd, "framebuffer_presets") == 0)
+    {
+        if (!AgentBuildFramebufferPresetListResult(result, sizeof(result)))
+        {
+            AgentSendResponse(fd, id, 0, NULL, "failed to build presets result");
+            return 0;
+        }
         AgentSendResponse(fd, id, 1, result, NULL);
         return 0;
     }
@@ -1355,9 +1484,12 @@ static int AgentHandleCommand(int fd, const char *line)
             }
         }
     }
-    else if (strcmp(cmd, "framebuffer_dump") == 0)
+    else if (strcmp(cmd, "framebuffer_dump") == 0 || strcmp(cmd, "framebuffer_dump_preset") == 0)
     {
         char output_path[1024];
+        char preset_name[64];
+        const struct agent_framebuffer_preset* preset = NULL;
+        int use_preset = 0;
         int front = 0;
         int video_size = 0;
         int width = 0;
@@ -1380,6 +1512,21 @@ static int AgentHandleCommand(int fd, const char *line)
             return 0;
         }
         (void) AgentGetBool(line, "front", &front);
+        if (strcmp(cmd, "framebuffer_dump_preset") == 0)
+        {
+            if (!AgentGetString(line, "preset", preset_name, sizeof(preset_name)))
+            {
+                AgentSendResponse(fd, id, 0, NULL, "missing preset");
+                return 0;
+            }
+            preset = AgentFindFramebufferPreset(preset_name);
+            if (preset == NULL)
+            {
+                AgentSendResponse(fd, id, 0, NULL, "unknown preset");
+                return 0;
+            }
+            use_preset = 1;
+        }
         if ((*CoreDoCommand)(M64CMD_CORE_STATE_QUERY, M64CORE_VIDEO_SIZE, &video_size) != M64ERR_SUCCESS)
         {
             AgentSendResponse(fd, id, 0, NULL, "failed to query video size");
@@ -1396,10 +1543,17 @@ static int AgentHandleCommand(int fd, const char *line)
 
         crop_w = width;
         crop_h = height;
-        (void) AgentGetInt(line, "crop_x", &crop_x);
-        (void) AgentGetInt(line, "crop_y", &crop_y);
-        (void) AgentGetInt(line, "crop_w", &crop_w);
-        (void) AgentGetInt(line, "crop_h", &crop_h);
+        if (use_preset)
+        {
+            AgentApplyFramebufferPresetCrop(preset, width, height, &crop_x, &crop_y, &crop_w, &crop_h);
+        }
+        else
+        {
+            (void) AgentGetInt(line, "crop_x", &crop_x);
+            (void) AgentGetInt(line, "crop_y", &crop_y);
+            (void) AgentGetInt(line, "crop_w", &crop_w);
+            (void) AgentGetInt(line, "crop_h", &crop_h);
+        }
         (void) AgentGetInt(line, "scale_div", &scale_div);
 
         if (crop_x < 0) crop_x = 0;
@@ -1474,9 +1628,26 @@ static int AgentHandleCommand(int fd, const char *line)
         free(rgb);
         free(out_rgb);
 
-        snprintf(result, sizeof(result),
-            "{\"path\":\"%s\",\"width\":%d,\"height\":%d,\"crop_w\":%d,\"crop_h\":%d,\"scale_div\":%d}",
-            output_path, out_w, out_h, crop_w, crop_h, scale_div);
+        if (use_preset)
+        {
+            snprintf(result, sizeof(result),
+                "{\"path\":\"%s\",\"preset\":\"%s\",\"source_width\":%d,\"source_height\":%d,"
+                "\"crop_x\":%d,\"crop_y\":%d,\"crop_w\":%d,\"crop_h\":%d,"
+                "\"width\":%d,\"height\":%d,\"scale_div\":%d}",
+                output_path, preset->name, width, height,
+                crop_x, crop_y, crop_w, crop_h,
+                out_w, out_h, scale_div);
+        }
+        else
+        {
+            snprintf(result, sizeof(result),
+                "{\"path\":\"%s\",\"source_width\":%d,\"source_height\":%d,"
+                "\"crop_x\":%d,\"crop_y\":%d,\"crop_w\":%d,\"crop_h\":%d,"
+                "\"width\":%d,\"height\":%d,\"scale_div\":%d}",
+                output_path, width, height,
+                crop_x, crop_y, crop_w, crop_h,
+                out_w, out_h, scale_div);
+        }
         AgentSendResponse(fd, id, 1, result, NULL);
         return 0;
     }
