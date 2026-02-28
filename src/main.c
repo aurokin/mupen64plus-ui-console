@@ -1655,6 +1655,7 @@ static int AgentHandleCommand(int fd, const char *line)
     {
         char output_path[1024];
         int front = 0;
+        int rotate180 = 0;
         int video_size = 0;
         int width = 0;
         int height = 0;
@@ -1676,6 +1677,7 @@ static int AgentHandleCommand(int fd, const char *line)
             return 0;
         }
         (void) AgentGetBool(line, "front", &front);
+        (void) AgentGetBool(line, "rotate180", &rotate180);
         if ((*CoreDoCommand)(M64CMD_CORE_STATE_QUERY, M64CORE_VIDEO_SIZE, &video_size) != M64ERR_SUCCESS)
         {
             AgentSendResponse(fd, id, 0, NULL, "failed to query video size");
@@ -1744,9 +1746,16 @@ static int AgentHandleCommand(int fd, const char *line)
                 size_t src_idx;
                 size_t dst_idx;
                 uint16_t z;
+                int dst_x = x;
+                int dst_y = y;
                 if (src_x >= width) src_x = width - 1;
+                if (rotate180)
+                {
+                    dst_x = out_w - 1 - x;
+                    dst_y = out_h - 1 - y;
+                }
                 src_idx = (size_t) src_y * (size_t) width + (size_t) src_x;
-                dst_idx = ((size_t) y * (size_t) out_w + (size_t) x) * 2U;
+                dst_idx = ((size_t) dst_y * (size_t) out_w + (size_t) dst_x) * 2U;
                 z = depth[src_idx];
                 out_depth[dst_idx + 0] = (unsigned char) (z & 0xff);
                 out_depth[dst_idx + 1] = (unsigned char) ((z >> 8) & 0xff);
@@ -1776,10 +1785,10 @@ static int AgentHandleCommand(int fd, const char *line)
         snprintf(result, sizeof(result),
             "{\"path\":\"%s\",\"format\":\"u16le\",\"source_width\":%d,\"source_height\":%d,"
             "\"crop_x\":%d,\"crop_y\":%d,\"crop_w\":%d,\"crop_h\":%d,"
-            "\"width\":%d,\"height\":%d,\"scale_div\":%d}",
+            "\"width\":%d,\"height\":%d,\"scale_div\":%d,\"rotate180\":%d}",
             output_path, width, height,
             crop_x, crop_y, crop_w, crop_h,
-            out_w, out_h, scale_div);
+            out_w, out_h, scale_div, rotate180 ? 1 : 0);
         AgentSendResponse(fd, id, 1, result, NULL);
         return 0;
     }

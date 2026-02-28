@@ -256,7 +256,7 @@ Example commands:
 {"id":19,"cmd":"framebuffer_dump","path":"/tmp/frame.ppm","scale_div":4}
 {"id":20,"cmd":"framebuffer_presets"}
 {"id":21,"cmd":"framebuffer_dump_preset","path":"/tmp/hud.ppm","preset":"hud","scale_div":2}
-{"id":22,"cmd":"depth_dump","path":"/tmp/depth.bin","scale_div":2}
+{"id":22,"cmd":"depth_dump","path":"/tmp/depth.bin","scale_div":2,"rotate180":1}
 {"id":23,"cmd":"mem_read","addr":2147483648,"bits":32}
 {"id":24,"cmd":"mem_write","addr":2147483648,"bits":32,"value":1}
 
@@ -279,6 +279,7 @@ Framebuffer helpers:
   - `action_command`
 - `framebuffer_dump` remains available for explicit crop rectangles.
 - `depth_dump` writes a cropped/scaled depth artifact as little-endian `u16` values (`format: "u16le"` in response).
+- `depth_dump` accepts optional `rotate180` (0/1) to rotate the exported depth image for orientation alignment with agent pipelines.
 
 Controller input uses the core 32-bit N64 input encoding:
 - Buttons: DPAD Right=0x0001 Left=0x0002 Down=0x0004 Up=0x0008
