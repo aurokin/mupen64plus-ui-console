@@ -609,8 +609,25 @@ static void SetMax43WindowForAgentMode(void)
     int screen_h = 768;
     int desktop_w = 0;
     int desktop_h = 0;
+    int safe_max_w = 1440;
+    int safe_max_h = 1080;
+    const char *env_max_w = getenv("M64_AGENT_SAFE_MAX_W");
+    const char *env_max_h = getenv("M64_AGENT_SAFE_MAX_H");
     SDL_DisplayMode display_mode;
     int video_was_init = SDL_WasInit(SDL_INIT_VIDEO);
+
+    if (env_max_w != NULL && *env_max_w != '\0')
+    {
+        int parsed = atoi(env_max_w);
+        if (parsed > 0)
+            safe_max_w = parsed;
+    }
+    if (env_max_h != NULL && *env_max_h != '\0')
+    {
+        int parsed = atoi(env_max_h);
+        if (parsed > 0)
+            safe_max_h = parsed;
+    }
 
     if (SDL_InitSubSystem(SDL_INIT_VIDEO) == 0)
     {
@@ -633,6 +650,17 @@ static void SetMax43WindowForAgentMode(void)
         else
             desktop_h = (desktop_w * 3) / 4;
 
+        if (safe_max_w > 0 && desktop_w > safe_max_w)
+        {
+            desktop_w = safe_max_w;
+            desktop_h = (desktop_w * 3) / 4;
+        }
+        if (safe_max_h > 0 && desktop_h > safe_max_h)
+        {
+            desktop_h = safe_max_h;
+            desktop_w = (desktop_h * 4) / 3;
+        }
+
         screen_w = desktop_w;
         screen_h = desktop_h;
     }
@@ -642,8 +670,8 @@ static void SetMax43WindowForAgentMode(void)
     (*ConfigSetParameter)(l_ConfigVideo, "ScreenHeight", M64TYPE_INT, &screen_h);
 
     DebugMessage(M64MSG_INFO,
-        "Agent mode window size set to %dx%d (max 4:3 within display)",
-        screen_w, screen_h);
+        "Agent mode window size set to %dx%d (max 4:3 within display, capped at %dx%d)",
+        screen_w, screen_h, safe_max_w, safe_max_h);
 
     if (!video_was_init)
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
@@ -658,11 +686,18 @@ static void ApplyAgentProfile(void)
 
     if (l_AgentProfileMode == AGENT_PROFILE_WATCH)
     {
-        value = 1;
+        int watch_osd_enabled = 0;
+        const char *watch_osd_env = getenv("M64_AGENT_WATCH_OSD");
+        if (watch_osd_env != NULL && *watch_osd_env != '\0' && atoi(watch_osd_env) != 0)
+            watch_osd_enabled = 1;
+
+        value = watch_osd_enabled ? 1 : 0;
         (*ConfigSetParameter)(l_ConfigCore, "OnScreenDisplay", M64TYPE_BOOL, &value);
+        value = 1;
         if ((*CoreDoCommand)(M64CMD_CORE_STATE_SET, M64CORE_SPEED_LIMITER, &value) != M64ERR_SUCCESS)
             DebugMessage(M64MSG_WARNING, "failed to apply watch profile speed limiter setting");
-        DebugMessage(M64MSG_INFO, "applied agent profile: watch (OSD on, speed limiter on)");
+        DebugMessage(M64MSG_INFO, "applied agent profile: watch (OSD %s, speed limiter on)",
+            watch_osd_enabled ? "on" : "off");
     }
     else if (l_AgentProfileMode == AGENT_PROFILE_TRAIN)
     {
@@ -934,6 +969,100 @@ static int AgentBuildFramebufferPresetListResult(char *out, size_t out_size)
     return 1;
 }
 
+static int AgentBuildStateMetaPath(const char *state_path, char *meta_path, size_t meta_path_size)
+{
+    int wrote = 0;
+
+    if (state_path == NULL || meta_path == NULL || meta_path_size < 32)
+        return 0;
+
+    wrote = snprintf(meta_path, meta_path_size, "%s.agentmeta.json", state_path);
+    if (wrote < 0 || (size_t) wrote >= meta_path_size)
+        return 0;
+
+    return 1;
+}
+
+static int AgentReadTextFile(const char *path, char *out, size_t out_size)
+{
+    FILE *f = NULL;
+    size_t used = 0;
+    size_t got = 0;
+
+    if (path == NULL || out == NULL || out_size < 2)
+        return 0;
+
+    f = fopen(path, "rb");
+    if (f == NULL)
+        return 0;
+
+    used = 0;
+    while (used + 1 < out_size)
+    {
+        got = fread(out + used, 1, out_size - used - 1, f);
+        used += got;
+        if (got == 0)
+            break;
+    }
+    out[used] = '\0';
+    fclose(f);
+    return 1;
+}
+
+static int AgentWriteStateMeta(const char *state_path)
+{
+    char meta_path[1280];
+    int video_size = 0;
+    int width = 0;
+    int height = 0;
+    FILE *f = NULL;
+
+    if (!AgentBuildStateMetaPath(state_path, meta_path, sizeof(meta_path)))
+        return 0;
+    if ((*CoreDoCommand)(M64CMD_CORE_STATE_QUERY, M64CORE_VIDEO_SIZE, &video_size) != M64ERR_SUCCESS)
+        return 0;
+
+    width = (video_size >> 16) & 0xffff;
+    height = video_size & 0xffff;
+    if (width <= 0 || height <= 0)
+        return 0;
+
+    f = fopen(meta_path, "wb");
+    if (f == NULL)
+        return 0;
+
+    fprintf(f, "{\"schema\":1,\"video_width\":%d,\"video_height\":%d}\n", width, height);
+    fclose(f);
+    return 1;
+}
+
+static int AgentIsStateMetaCompatible(const char *state_path)
+{
+    char meta_path[1280];
+    char meta_json[512];
+    int expected_width = 0;
+    int expected_height = 0;
+    int video_size = 0;
+    int width = 0;
+    int height = 0;
+
+    if (!AgentBuildStateMetaPath(state_path, meta_path, sizeof(meta_path)))
+        return 0;
+    if (!AgentReadTextFile(meta_path, meta_json, sizeof(meta_json)))
+        return 0;
+    if (!AgentGetInt(meta_json, "video_width", &expected_width)
+        || !AgentGetInt(meta_json, "video_height", &expected_height))
+    {
+        return 0;
+    }
+    if ((*CoreDoCommand)(M64CMD_CORE_STATE_QUERY, M64CORE_VIDEO_SIZE, &video_size) != M64ERR_SUCCESS)
+        return 0;
+
+    width = (video_size >> 16) & 0xffff;
+    height = video_size & 0xffff;
+    return (width == expected_width && height == expected_height);
+}
+
 #ifndef WIN32
 static void AgentSetFd(int *fd_slot, int value)
 {
@@ -1091,6 +1220,40 @@ static int AgentWaitForEventSeqWithPausedStepping(SDL_atomic_t* seq, int previou
             remaining_ms = 1;
         if (!AgentWaitForFrameAdvance(frame_before, remaining_ms))
             return 0;
+    }
+
+    return 0;
+}
+
+static int AgentWaitForEventSeq(SDL_atomic_t* seq, int previous, int timeout_ms)
+{
+    Uint32 start = SDL_GetTicks();
+
+    while ((int) (SDL_GetTicks() - start) < timeout_ms)
+    {
+        if (SDL_AtomicGet(seq) != previous)
+            return 1;
+        if (l_AgentServerStop)
+            return 0;
+        SDL_Delay(1);
+    }
+
+    return 0;
+}
+
+static int AgentWaitForEmuState(int expected_state, int timeout_ms)
+{
+    Uint32 start = SDL_GetTicks();
+
+    while ((int) (SDL_GetTicks() - start) < timeout_ms)
+    {
+        int emu_state = M64EMU_STOPPED;
+        if ((*CoreDoCommand)(M64CMD_CORE_STATE_QUERY, M64CORE_EMU_STATE, &emu_state) == M64ERR_SUCCESS
+            && emu_state == expected_state)
+            return 1;
+        if (l_AgentServerStop)
+            return 0;
+        SDL_Delay(1);
     }
 
     return 0;
@@ -1419,9 +1582,11 @@ static int AgentHandleCommand(int fd, const char *line)
     else if (strcmp(cmd, "save_state") == 0)
     {
         int save_seq = SDL_AtomicGet(&l_StateSaveEventSeq);
+        int has_path = 0;
         if (AgentGetString(line, "path", path, sizeof(path)))
         {
             int format = 2;
+            has_path = 1;
             (void) AgentGetInt(line, "format", &format);
             cmd_result = (*CoreDoCommand)(M64CMD_STATE_SAVE, format, path);
         }
@@ -1442,19 +1607,53 @@ static int AgentHandleCommand(int fd, const char *line)
                 AgentSendResponse(fd, id, 0, NULL, "save_state failed");
                 return 0;
             }
+            if (has_path && !AgentWriteStateMeta(path))
+                DebugMessage(M64MSG_WARNING, "failed to write state metadata for '%s'", path);
         }
     }
     else if (strcmp(cmd, "load_state") == 0)
     {
         int load_seq = SDL_AtomicGet(&l_StateLoadEventSeq);
-        if (AgentGetString(line, "path", path, sizeof(path)))
+        int emu_state_before = M64EMU_STOPPED;
+        int restore_paused = 0;
+        int allow_legacy = 0;
+        int has_path = 0;
+
+        (void) AgentGetBool(line, "allow_legacy", &allow_legacy);
+        has_path = AgentGetString(line, "path", path, sizeof(path));
+        if (has_path && !allow_legacy && !AgentIsStateMetaCompatible(path))
+        {
+            AgentSendResponse(fd, id, 0, NULL,
+                "load_state blocked: missing/incompatible .agentmeta.json sidecar; resave state with this build or pass allow_legacy=true");
+            return 0;
+        }
+
+        if ((*CoreDoCommand)(M64CMD_CORE_STATE_QUERY, M64CORE_EMU_STATE, &emu_state_before) == M64ERR_SUCCESS
+            && emu_state_before == M64EMU_PAUSED)
+        {
+            if ((*CoreDoCommand)(M64CMD_RESUME, 0, NULL) == M64ERR_SUCCESS)
+                restore_paused = 1;
+            else
+            {
+                AgentSendResponse(fd, id, 0, NULL, "load_state failed to resume from paused state");
+                return 0;
+            }
+
+            if (!AgentWaitForEmuState(M64EMU_RUNNING, 1000))
+            {
+                AgentSendResponse(fd, id, 0, NULL, "load_state failed to enter running state");
+                return 0;
+            }
+        }
+
+        if (has_path)
             cmd_result = (*CoreDoCommand)(M64CMD_STATE_LOAD, 0, path);
         else
             cmd_result = (*CoreDoCommand)(M64CMD_STATE_LOAD, 0, NULL);
 
         if (cmd_result == M64ERR_SUCCESS)
         {
-            if (!AgentWaitForEventSeqWithPausedStepping(&l_StateLoadEventSeq, load_seq, 5000))
+            if (!AgentWaitForEventSeq(&l_StateLoadEventSeq, load_seq, 5000))
             {
                 AgentSendResponse(fd, id, 0, NULL, "load_state timed out");
                 return 0;
@@ -1464,6 +1663,9 @@ static int AgentHandleCommand(int fd, const char *line)
                 AgentSendResponse(fd, id, 0, NULL, "load_state failed");
                 return 0;
             }
+
+            if (restore_paused)
+                (void) (*CoreDoCommand)(M64CMD_PAUSE, 0, NULL);
         }
     }
     else if (strcmp(cmd, "screenshot") == 0)
